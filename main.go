@@ -12,15 +12,14 @@ import (
 const objectsPrefix = "/v1/objects/"
 const storageRoot = "./data/blobstore"
 
-func objectPathFromKey(key string) (string, error) {
+// -------------------------------
+// PATH HELPERS
+// -------------------------------
+
+func objectPathFromKey(key string) string {
 	cleanKey := filepath.Clean(key)
-
-	fullPath := filepath.Join(storageRoot, cleanKey)
-
-	return fullPath, nil
+	return filepath.Join(storageRoot, cleanKey)
 }
-
-func handlePutObject(w http.ResponseWriter, r )
 
 func getKeyFromPath(path string) (string, bool) {
 	if !strings.HasPrefix(path, objectsPrefix) {
@@ -42,34 +41,106 @@ func getKeyFromPath(path string) (string, bool) {
 
 	return key, true
 }
+
+// -------------------------------
+// PUT IMPLEMENTATION
+// -------------------------------
+
+func handlePutObject(w http.ResponseWriter, r *http.Request, key string) {
+	targetPath := objectPathFromKey(key)
+
+	// immutability check
+	if _, err := os.Stat(targetPath); err == nil {
+		http.Error(w, "object already exists", http.StatusConflict)
+		return
+	} else if !os.IsNotExist(err) {
+		log.Printf("stat error for %q: %v", targetPath, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// ensure directory exists
+	dir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("mkdir error %q: %v", dir, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// temp file
+	tmpFile, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		log.Printf("CreateTemp error: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+	}()
+
+	// write body -> temp file
+	if _, err := io.Copy(tmpFile, r.Body); err != nil {
+		log.Printf("io.Copy error: %v", err)
+		http.Error(w, "write error", http.StatusInternalServerError)
+		return
+	}
+
+	// flush to disk
+	if err := tmpFile.Sync(); err != nil {
+		log.Printf("Sync error: %v", err)
+		http.Error(w, "write error", http.StatusInternalServerError)
+		return
+	}
+
+	// close before rename
+	if err := tmpFile.Close(); err != nil {
+		log.Printf("Close error: %v", err)
+		http.Error(w, "write error", http.StatusInternalServerError)
+		return
+	}
+
+	// atomic rename
+	if err := os.Rename(tmpFile.Name(), targetPath); err != nil {
+		log.Printf("Rename error: %v", err)
+		http.Error(w, "write error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write([]byte("created\n"))
+}
+
+// -------------------------------
+// ROUTER
+// -------------------------------
+
 func handleObject(w http.ResponseWriter, r *http.Request) {
 	key, ok := getKeyFromPath(r.URL.Path)
 	if !ok {
 		http.Error(w, "invalid object key", http.StatusBadRequest)
 		return
 	}
+
 	switch r.Method {
 	case http.MethodPut:
-		// PUT /v1/objects/{key}
-		w.WriteHeader(http.StatusNotImplemented)
-		_, _ = w.Write([]byte("PUT not implemented yet for key: " + key + "\n"))
+		handlePutObject(w, r, key)
 
 	case http.MethodGet:
-		// GET /v1/objects/{key}
 		w.WriteHeader(http.StatusNotImplemented)
-		_, _ = w.Write([]byte("GET not implemented yet for key: " + key + "\n"))
+		_, _ = w.Write([]byte("GET not implemented yet\n"))
 
 	default:
-		// Any other method: 405 Method Not Allowed
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = w.Write([]byte("method not allowed\n"))
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
+// -------------------------------
+// MAIN
+// -------------------------------
+
 func main() {
 	mux := http.NewServeMux()
-
-	// All blob operations are under /v1/objects/.
 	mux.HandleFunc("/v1/objects/", handleObject)
 
 	server := &http.Server{
