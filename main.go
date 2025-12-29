@@ -112,6 +112,33 @@ func handlePutObject(w http.ResponseWriter, r *http.Request, key string) {
 }
 
 // -------------------------------
+// GET IMPLEMENTATION
+// -------------------------------
+
+func handleGetObject(w http.ResponseWriter, r *http.Request, key string) {
+	targetPath := objectPathFromKey(key)
+
+	f, err := os.Open(targetPath)
+	if os.IsNotExist(err) {
+		http.Error(w, "object not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("open error for %q: %v", targetPath, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	// Stream file contents to the client.
+	// We intentionally do not load the whole blob into memory.
+	if _, err := io.Copy(w, f); err != nil {
+		log.Printf("io.Copy (GET) error for %q: %v", targetPath, err)
+		// Can't reliably recover at this point, but we log it.
+	}
+}
+
+// -------------------------------
 // ROUTER
 // -------------------------------
 
@@ -127,8 +154,7 @@ func handleObject(w http.ResponseWriter, r *http.Request) {
 		handlePutObject(w, r, key)
 
 	case http.MethodGet:
-		w.WriteHeader(http.StatusNotImplemented)
-		_, _ = w.Write([]byte("GET not implemented yet\n"))
+		handleGetObject(w, r, key)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
